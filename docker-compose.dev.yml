@@ -49,6 +49,24 @@ services:
     networks:
       - internal-dev
       - external-host
+  
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus-dev
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - '9090:9090'
+    networks:
+      - internal-dev
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: grafana-dev
+    ports:
+      - '3002:3000' # Mapping to 3002 on your machine so it doesn't clash with Next.js
+    networks:
+      - internal-dev
 
 volumes:
   npb-app-dev-node_modules:

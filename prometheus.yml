@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s # How often to poll the app for metrics
+
+scrape_configs:
+  - job_name: 'nextjs-app'
+    metrics_path: '/api/metrics'
+    static_configs:
+      - targets: ['npb-app-dev:3001'] # Uses the container name and port from your compose file
