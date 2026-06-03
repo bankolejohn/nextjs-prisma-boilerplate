@@ -26,13 +26,11 @@ const Home: FC = () => {
 };
 
 export const getServerSideProps: GetServerSideProps = async ({ req, res }) => {
-  // just for MeProvider
-  const callback1 = async () => await getMe({ req });
-  const me = await ssrNcHandler<ClientUser | null>(req, res, callback1);
-
-  // empty params, nothing to validate
-  const callback = async () => await getPosts();
-  const posts = ssrNcHandler<PaginatedResponse<PostWithAuthor>>(req, res, callback);
+  // Run both DB calls in parallel instead of sequentially
+  const [me, posts] = await Promise.all([
+    ssrNcHandler<ClientUser | null>(req, res, () => getMe({ req })),
+    ssrNcHandler<PaginatedResponse<PostWithAuthor>>(req, res, () => getPosts()),
+  ]);
 
   if (!posts) return Redirects._500;
 

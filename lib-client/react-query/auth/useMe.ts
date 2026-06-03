@@ -27,6 +27,8 @@ export const useMe = () => {
     () => getUser(id),
     {
       enabled: status !== 'loading',
+      staleTime: 60 * 1000, // 60s — current user data doesn't change that often
+      cacheTime: 5 * 60 * 1000, // keep in memory for 5 minutes after unmount
       onError: (error) => {
         console.error('me query error: ', error.response);
 

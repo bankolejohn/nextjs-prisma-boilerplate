@@ -16,6 +16,8 @@ export const usePost = (id: number) => {
     () => getPost(id),
     {
       enabled: !isNaN(id), // important for 0
+      staleTime: 30 * 1000, // 30s — post content rarely changes mid-session
+      cacheTime: 5 * 60 * 1000, // keep in cache for 5 minutes after unmount
     }
   );
 
