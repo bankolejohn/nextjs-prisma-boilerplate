@@ -3,14 +3,9 @@ const path = require('path');
 module.exports = {
   reactStrictMode: true,
   trailingSlash: true,
-  experimental: {
-    // maybe fixes hydration error
-    // https://github.com/vercel/next.js/issues/35564#issuecomment-1077347776
-    // https://github.com/facebook/react/issues/24125
-    runtime: 'nodejs',
-    serverComponents: true,
-    reactRoot: true,
-  },
+  // Note: experimental.runtime, serverComponents, and reactRoot removed —
+  // they forced SWC compilation which requires OpenSSL 1.1 (unavailable on Ubuntu 24.04).
+  // .babelrc is present so Next.js uses Babel automatically, which is cross-platform.
   /*
   webpackDevMiddleware: (config) => {
     config.watchOptions = {
