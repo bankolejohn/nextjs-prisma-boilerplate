@@ -16,7 +16,13 @@ if (typeof window === 'undefined') {
     prisma = new PrismaClient();
   } else {
     if (!global.prisma) {
-      global.prisma = new PrismaClient();
+      // Log warnings and errors to stdout in development
+      global.prisma = new PrismaClient({
+        log: [
+          { level: 'warn', emit: 'stdout' },
+          { level: 'error', emit: 'stdout' },
+        ],
+      });
     }
     prisma = global.prisma;
   }

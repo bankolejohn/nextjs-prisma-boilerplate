@@ -16,7 +16,11 @@ export const useUser = (params: UserGetData) => {
   const query = useQuery<ClientUser, AxiosError>(
     filterEmptyKeys([QueryKeys.USER, subKey]),
     () => getUser(params),
-    { enabled: !!subKey }
+    {
+      enabled: !!subKey,
+      staleTime: 30 * 1000, // 30s — profile data is not volatile
+      cacheTime: 5 * 60 * 1000,
+    }
   );
   return query;
 };
