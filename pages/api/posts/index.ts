@@ -13,7 +13,26 @@ import { getMe } from 'lib-server/services/users';
 import { createPost, getPosts } from 'lib-server/services/posts';
 import ApiError from 'lib-server/error';
 
+// Import our global telemetry tracker safely
+import { httpRequestsCounter } from 'lib-server/metrics';
+
 const handler = apiHandler();
+
+// 🚀 GLOBAL INTERCEPTOR MIDDLEWARE
+// This catches EVERY single network request before auth, validation, or routing logic fires!
+handler.use((req: NextApiRequest, res: NextApiResponse, next: () => void) => {
+  try {
+    // Dynamic fallback matching whatever HTTP method (GET, POST, etc.) is incoming
+    httpRequestsCounter.inc({ 
+      method: req.method || 'GET', 
+      route: '/api/posts', 
+      status: 200 
+    });
+  } catch (error) {
+    console.error("Prometheus increment failed:", error);
+  }
+  next(); // Pass processing down to the handlers below safely
+});
 
 const validatePostCreate = withValidation({
   schema: postCreateSchema,
@@ -33,14 +52,15 @@ handler.get(
     req: NextApiRequest,
     res: NextApiResponse<PaginatedResponse<PostWithAuthor>>
   ) => {
-    // just to convert types
+    // Just to convert types
     const parsedData = validatePostsSearchQueryParams(req.query);
 
     const { published, userId } = parsedData;
     const me = await getMe({ req });
 
-    if (published === false && userId && me && me?.id !== userId)
+    if (published === false && userId && me && me?.id !== userId) {
       throw new ApiError('You can not read draft posts of another user.', 401);
+    }
 
     const posts = await getPosts(parsedData);
     res.status(200).json(posts);
@@ -48,7 +68,7 @@ handler.get(
 );
 
 handler.post(
-  requireAuth, // checks session already
+  requireAuth, // Checks session already
   validatePostCreate(),
   async (req: NextApiRequest, res: NextApiResponse<PostWithAuthor>) => {
     const me = await getMe({ req });

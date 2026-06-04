@@ -12,5 +12,6 @@
   "scss.validate": false,
   "typescript.tsdk": "node_modules/typescript/lib",
   // disable run tests on startup
-  "jest.autoRun": "off"
+  "jest.autoRun": "off",
+  "prisma.pinToPrisma6": true
 }
