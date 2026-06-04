@@ -22,16 +22,15 @@ const handler = apiHandler();
 // This catches EVERY single network request before auth, validation, or routing logic fires!
 handler.use((req: NextApiRequest, res: NextApiResponse, next: () => void) => {
   try {
-    // Dynamic fallback matching whatever HTTP method (GET, POST, etc.) is incoming
-    httpRequestsCounter.inc({ 
-      method: req.method || 'GET', 
-      route: '/api/posts', 
-      status: 200 
+    httpRequestsCounter.inc({
+      method: req.method || 'GET',
+      route: '/api/posts',
+      status: 200,
     });
-  } catch (error) {
-    console.error("Prometheus increment failed:", error);
+  } catch (_err) {
+    // silently ignore counter errors — never let metrics break the request
   }
-  next(); // Pass processing down to the handlers below safely
+  next();
 });
 
 const validatePostCreate = withValidation({

@@ -16,21 +16,12 @@ if (typeof window === 'undefined') {
     prisma = new PrismaClient();
   } else {
     if (!global.prisma) {
+      // Log warnings and errors to stdout in development
       global.prisma = new PrismaClient({
         log: [
-          { level: 'query', emit: 'event' },
           { level: 'warn', emit: 'stdout' },
           { level: 'error', emit: 'stdout' },
         ],
-      });
-
-      // Log slow queries in development (threshold: 100ms)
-      global.prisma.$on('query', (e: any) => {
-        if (e.duration > 100) {
-          console.warn(
-            `⚠️  Slow query (${e.duration}ms): ${e.query.substring(0, 80)}...`
-          );
-        }
       });
     }
     prisma = global.prisma;
