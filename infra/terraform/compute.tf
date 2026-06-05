@@ -31,17 +31,26 @@ resource "aws_instance" "app_server" {
   }
 
   # User data script — runs once on first boot after instance creation
-  # Installs Docker, Nginx, Git and sets up the ubuntu user
+  # Fully bootstraps the server so it is pipeline-ready without manual SSH
   user_data = <<-EOF
     #!/bin/bash
-    set -e
+    set -euxo pipefail
+    exec > /var/log/user-data.log 2>&1
 
-    # System update
+    echo "==> [1/7] System update"
     apt-get update -y
-    apt-get upgrade -y
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-    # Install Docker
-    apt-get install -y ca-certificates curl gnupg git nginx
+    echo "==> [2/7] Install base packages"
+    apt-get install -y \
+      ca-certificates \
+      curl \
+      gnupg \
+      git \
+      nginx \
+      openssl
+
+    echo "==> [3/7] Install Docker"
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
       gpg --dearmor -o /etc/apt/keyrings/docker.gpg
@@ -52,20 +61,57 @@ resource "aws_instance" "app_server" {
       $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
       tee /etc/apt/sources.list.d/docker.list > /dev/null
     apt-get update -y
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    apt-get install -y \
+      docker-ce \
+      docker-ce-cli \
+      containerd.io \
+      docker-compose-plugin
 
-    # Allow ubuntu user to run Docker without sudo
+    echo "==> [4/7] Configure Docker and services"
     usermod -aG docker ubuntu
-
-    # Enable services on boot
     systemctl enable docker
+    systemctl start docker
     systemctl enable nginx
     systemctl start nginx
 
-    # Create the external Docker network required by docker-compose.prod.yml
+    echo "==> [5/7] Create required Docker networks"
     docker network create proxy || true
 
-    echo "Bootstrap complete" > /tmp/bootstrap-done.txt
+    echo "==> [6/7] Clone application repository"
+    cd /home/ubuntu
+    git clone https://github.com/bankolejohn/nextjs-prisma-boilerplate.git
+    chown -R ubuntu:ubuntu /home/ubuntu/nextjs-prisma-boilerplate
+
+    echo "==> [7/7] Configure Nginx reverse proxy"
+    cat > /etc/nginx/sites-available/npb-app <<'NGINX'
+    server {
+        listen 80;
+        server_name _;
+
+        client_max_body_size 10M;
+
+        location / {
+            proxy_pass http://localhost:3001;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_cache_bypass $http_upgrade;
+        }
+    }
+    NGINX
+
+    ln -sf /etc/nginx/sites-available/npb-app /etc/nginx/sites-enabled/npb-app
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t && systemctl reload nginx
+
+    echo "==> Bootstrap complete. Server is pipeline-ready."
+    echo "==> Next step: SSH in and create envs/production-docker/.env.production.docker.local"
+    echo "==> Then push a commit to trigger the CI/CD pipeline."
+    echo "Bootstrap finished at $(date)" > /tmp/bootstrap-done.txt
   EOF
 
   tags = {
