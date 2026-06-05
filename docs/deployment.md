@@ -15,9 +15,10 @@
 2. [Phase 1 — Local Development](#2-phase-1--local-development)
 3. [Phase 2 — Containerization](#3-phase-2--containerization)
 4. [Phase 3 — EC2 Deployment with Docker](#4-phase-3--ec2-deployment-with-docker)
-5. [Observability — Prometheus and Grafana](#5-observability--prometheus-and-grafana)
-6. [Troubleshooting Reference](#6-troubleshooting-reference)
-7. [Architecture Summary](#7-architecture-summary)
+5. [Phase 4 — CI/CD with GitHub Actions](#5-phase-4--cicd-with-github-actions)
+6. [Observability — Prometheus and Grafana](#6-observability--prometheus-and-grafana)
+7. [Troubleshooting Reference](#7-troubleshooting-reference)
+8. [Architecture Summary](#8-architecture-summary)
 
 ---
 
@@ -480,7 +481,161 @@ The application is now accessible at `http://<ELASTIC_IP>` on port 80.
 
 ---
 
-## 5. Observability — Prometheus and Grafana
+## 5. Phase 4 — CI/CD with GitHub Actions
+
+### Goal
+
+Eliminate manual deployments entirely. Every push to `main` automatically builds a new Docker image, pushes it to Docker Hub, and deploys it to the EC2 server. From this point forward, deploying is just `git push`.
+
+### Pipeline Overview
+
+```
+Developer pushes to main
+         │
+         ▼
+┌─────────────────────────────┐
+│   Job 1: build-and-push     │
+│                             │
+│  1. Checkout code           │
+│  2. Login to Docker Hub     │
+│  3. Build Dockerfile.prod   │
+│     (with build args)       │
+│  4. Push image:             │
+│     - :latest               │
+│     - :<commit-sha>         │
+└────────────┬────────────────┘
+             │ on success
+             ▼
+┌─────────────────────────────┐
+│   Job 2: deploy             │
+│                             │
+│  1. SSH into EC2            │
+│  2. git pull origin main    │
+│  3. docker pull :latest     │
+│  4. docker compose down     │
+│  5. docker compose up -d    │
+│  6. prisma migrate deploy   │
+│  7. docker image prune      │
+└─────────────────────────────┘
+```
+
+### Workflow File
+
+Location: `.github/workflows/deploy.yml`
+
+Triggers:
+
+- Every push to the `main` branch
+- Manual trigger via GitHub Actions UI (`workflow_dispatch`)
+
+### Required GitHub Secrets
+
+Go to: **GitHub → Repository → Settings → Secrets and variables → Actions**
+
+Add the following repository secrets:
+
+| Secret Name          | Description                                  | Example Value                                                        |
+| -------------------- | -------------------------------------------- | -------------------------------------------------------------------- |
+| `DOCKERHUB_USERNAME` | Docker Hub account username                  | `youruser`                                                           |
+| `DOCKERHUB_TOKEN`    | Docker Hub access token (not password)       | `dckr_pat_xxx...`                                                    |
+| `NPB_DATABASE_URL`   | Full production database connection string   | `postgresql://npb_user:pass@npb-db-prod:5432/npb-prod?schema=public` |
+| `NPB_NEXTAUTH_URL`   | Full public URL of the application           | `http://44.200.64.211`                                               |
+| `EC2_HOST`           | EC2 Elastic IP address                       | `44.200.64.211`                                                      |
+| `EC2_USERNAME`       | SSH username on EC2                          | `ubuntu`                                                             |
+| `EC2_SSH_KEY`        | Full contents of the `.pem` private key file | `-----BEGIN RSA PRIVATE KEY-----...`                                 |
+
+**Generating a Docker Hub access token:**
+Docker Hub → Account Settings → Security → New Access Token → copy the token.
+
+**Getting the EC2 SSH key:**
+
+```bash
+cat ~/.ssh/npb-prod-key.pem
+```
+
+Copy the entire output including the `-----BEGIN` and `-----END` lines.
+
+### Why Build Args Come From Secrets, Not env_file
+
+`Dockerfile.prod` requires `DATABASE_URL` and `NEXTAUTH_URL` at **build time** (not just runtime) because Next.js embeds the `NEXTAUTH_URL` into the compiled client bundle for SEO, and `DATABASE_URL` is needed if any pages use `getStaticProps`.
+
+Docker Compose reads build args from the **host shell environment**. In the pipeline, GitHub Actions exposes secrets as environment variables via the `build-args` input — so they are available to the build without ever being written to a file.
+
+### Docker Image Tagging Strategy
+
+Every build produces two tags:
+
+```
+youruser/nextjs-prisma-boilerplate:latest      ← always the newest build
+youruser/nextjs-prisma-boilerplate:<sha>       ← e.g. :a1b2c3d4...
+```
+
+The commit SHA tag gives you full traceability — you can look at any running container and know exactly which commit it was built from. It also enables rollbacks:
+
+```bash
+# Roll back to a previous version
+docker pull youruser/nextjs-prisma-boilerplate:<previous-sha>
+docker tag youruser/nextjs-prisma-boilerplate:<previous-sha> \
+           youruser/nextjs-prisma-boilerplate:latest
+docker compose -f docker-compose.prod.yml -p npb-prod up -d
+```
+
+### Build Layer Caching
+
+The pipeline uses Docker registry-based layer caching:
+
+```yaml
+cache-from: type=registry,ref=youruser/nextjs-prisma-boilerplate:buildcache
+cache-to: type=registry,ref=youruser/nextjs-prisma-boilerplate:buildcache,mode=max
+```
+
+On first run, there is no cache — the full build takes 8-12 minutes. On subsequent runs where only application code changed (not `package.json` or `yarn.lock`), Docker reuses cached layers for dependency installation, cutting build time to 2-3 minutes.
+
+### Migration Handling in the Pipeline
+
+The deploy job runs `prisma migrate deploy` explicitly after the containers start:
+
+```bash
+docker exec npb-app-prod npx prisma migrate deploy
+```
+
+This is technically redundant because `Dockerfile.prod` already runs migrations via `CMD ["yarn", "cmd:start:prod"]` which expands to `prisma migrate deploy && prisma db seed && node dist/index.js`.
+
+Running it explicitly in the pipeline is intentional for visibility — the migration step appears as a named action in the deployment log. In a future iteration, migrations will be removed from the container CMD and run exclusively as a pipeline step, giving full control over migration ordering relative to traffic.
+
+### Verifying a Successful Deployment
+
+After the pipeline completes:
+
+1. Check the Actions tab — both jobs should show green checkmarks
+2. Check the running containers on EC2:
+
+```bash
+docker ps
+docker logs npb-app-prod --tail 20
+```
+
+3. Verify the application is live:
+
+```bash
+curl http://<ELASTIC_IP>
+```
+
+### On Secrets Management
+
+GitHub Secrets is a production-grade solution for single-application deployments and is used by many real companies. It encrypts secrets at rest and only exposes them to pipeline runners.
+
+The planned evolution as the system grows:
+
+| Phase         | Secrets Approach                                                                  |
+| ------------- | --------------------------------------------------------------------------------- |
+| Phase 4 (now) | GitHub Secrets                                                                    |
+| Phase 5       | Terraform provisions AWS Secrets Manager                                          |
+| Phase 6       | Pipeline fetches secrets via IAM role — no long-lived credentials stored anywhere |
+
+---
+
+## 6. Observability — Prometheus and Grafana
 
 Prometheus and Grafana are included in `docker-compose.dev.yml` for local development observability. They are not currently part of the production `docker-compose.prod.yml`.
 
@@ -494,7 +649,7 @@ Default metrics exposed include Node.js process CPU, memory, event loop lag, and
 
 ---
 
-## 6. Troubleshooting Reference
+## 7. Troubleshooting Reference
 
 ### `react-hook-form` engine incompatibility during Docker build
 
@@ -671,7 +826,7 @@ docker network create proxy
 
 ---
 
-## 7. Architecture Summary
+## 8. Architecture Summary
 
 ### Request Flow (Production)
 
