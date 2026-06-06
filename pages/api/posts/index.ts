@@ -13,25 +13,9 @@ import { getMe } from 'lib-server/services/users';
 import { createPost, getPosts } from 'lib-server/services/posts';
 import ApiError from 'lib-server/error';
 
-// Import our global telemetry tracker safely
-import { httpRequestsCounter } from 'lib-server/metrics';
-
+// Metrics are now handled globally in lib-server/nc.ts via metricsMiddleware
+// No per-route instrumentation needed here
 const handler = apiHandler();
-
-// 🚀 GLOBAL INTERCEPTOR MIDDLEWARE
-// This catches EVERY single network request before auth, validation, or routing logic fires!
-handler.use((req: NextApiRequest, res: NextApiResponse, next: () => void) => {
-  try {
-    httpRequestsCounter.inc({
-      method: req.method || 'GET',
-      route: '/api/posts',
-      status: 200,
-    });
-  } catch (_err) {
-    // silently ignore counter errors — never let metrics break the request
-  }
-  next();
-});
 
 const validatePostCreate = withValidation({
   schema: postCreateSchema,
@@ -51,7 +35,6 @@ handler.get(
     req: NextApiRequest,
     res: NextApiResponse<PaginatedResponse<PostWithAuthor>>
   ) => {
-    // Just to convert types
     const parsedData = validatePostsSearchQueryParams(req.query);
 
     const { published, userId } = parsedData;
@@ -67,7 +50,7 @@ handler.get(
 );
 
 handler.post(
-  requireAuth, // Checks session already
+  requireAuth,
   validatePostCreate(),
   async (req: NextApiRequest, res: NextApiResponse<PostWithAuthor>) => {
     const me = await getMe({ req });
