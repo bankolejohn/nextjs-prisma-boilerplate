@@ -1,0 +1,41 @@
+# HPA automatically adjusts the number of app pods based on CPU usage
+# When average CPU exceeds 70%, K8s adds more pods (up to maxReplicas)
+# When load drops, it scales back down (to minReplicas)
+#
+# Requires metrics-server to be running:
+#   minikube addons enable metrics-server
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: npb-app-hpa
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: npb-app
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70 # Scale up when average CPU > 70%
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # Wait 5 min before scaling down (avoids flapping)
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60 # Remove max 1 pod per minute
+    scaleUp:
+      stabilizationWindowSeconds: 30 # Scale up quickly under load
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60 # Add up to 2 pods per minute

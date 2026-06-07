@@ -1,0 +1,144 @@
+# Service exposes the app to other resources inside the cluster
+# The Ingress will route external traffic through this service
+apiVersion: v1
+kind: Service
+metadata:
+  name: npb-app
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: app
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3001
+      targetPort: 3001
+      protocol: TCP
+  selector:
+    app.kubernetes.io/component: app
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: npb-app
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: app
+spec:
+  replicas: 2 # Run 2 copies for availability
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # Never take down existing pods before new ones are ready
+      maxSurge: 1 # Spin up 1 extra pod at a time during rollout
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nextjs-prisma-boilerplate
+        app.kubernetes.io/component: app
+    spec:
+      containers:
+        - name: app
+          # Use the Docker Hub image from our CI/CD pipeline
+          # For Minikube local testing, we'll use a locally built image
+          image: bankolejohn/nextjs-prisma-boilerplate:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3001
+          env:
+            # Construct DATABASE_URL from secret + configmap values
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_DB
+            - name: DATABASE_URL
+              value: 'postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@npb-db:5432/$(POSTGRES_DB)?schema=public&connection_limit=10&pool_timeout=20'
+            - name: SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: SECRET
+            - name: NEXTAUTH_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: NEXTAUTH_URL
+            - name: SITE_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: SITE_PROTOCOL
+            - name: SITE_HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: SITE_HOSTNAME
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: PORT
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: APP_ENV
+            # Public vars (embedded at build time, but still needed for runtime config)
+            - name: NEXT_PUBLIC_POSTS_PER_PAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: NEXT_PUBLIC_POSTS_PER_PAGE
+            - name: NEXT_PUBLIC_USERS_PER_PAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: npb-config
+                  key: NEXT_PUBLIC_USERS_PER_PAGE
+            # OAuth — empty for now
+            - name: FACEBOOK_CLIENT_ID
+              value: ''
+            - name: FACEBOOK_CLIENT_SECRET
+              value: ''
+            - name: GOOGLE_CLIENT_ID
+              value: ''
+            - name: GOOGLE_CLIENT_SECRET
+              value: ''
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          # Readiness probe — pod only receives traffic when app responds
+          readinessProbe:
+            httpGet:
+              path: /api/metrics
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          # Liveness probe — K8s restarts pod if app becomes unresponsive
+          livenessProbe:
+            httpGet:
+              path: /api/metrics
+              port: 3001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3

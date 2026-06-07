@@ -1,0 +1,54 @@
+# This Job runs prisma migrate deploy once per deployment
+# In production, trigger this manually or as a CI/CD step BEFORE
+# rolling out new app pods — never let migrations run automatically
+# in all replicas simultaneously
+#
+# Usage:
+#   kubectl apply -f k8s/06-migration-job.yml
+#   kubectl wait --for=condition=complete job/npb-migrate -n npb --timeout=120s
+#   kubectl delete job npb-migrate -n npb  # clean up for next deployment
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: npb-migrate
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: migration
+spec:
+  ttlSecondsAfterFinished: 300 # Auto-delete job 5 minutes after completion
+  backoffLimit: 3 # Retry up to 3 times on failure
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: bankolejohn/nextjs-prisma-boilerplate:latest
+          imagePullPolicy: IfNotPresent
+          command: ['npx', 'prisma', 'migrate', 'deploy']
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_DB
+            - name: DATABASE_URL
+              value: 'postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@npb-db:5432/$(POSTGRES_DB)?schema=public'
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

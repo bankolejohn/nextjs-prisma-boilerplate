@@ -1,0 +1,35 @@
+# Ingress routes external HTTP traffic to the npb-app service
+# In Minikube, enable the ingress addon first:
+#   minikube addons enable ingress
+#
+# Then get the Minikube IP:
+#   minikube ip
+#
+# Access the app at: http://<minikube-ip>/
+#
+# In production (AWS EKS), an Ingress controller like nginx-ingress
+# or AWS ALB Ingress Controller creates a load balancer automatically
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: npb-ingress
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: '10m'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '60'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '60'
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: npb-app
+                port:
+                  number: 3001

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: npb-config
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+data:
+  APP_ENV: 'kubernetes'
+  SITE_PROTOCOL: 'http'
+  SITE_HOSTNAME: 'localhost'
+  PORT: '3001'
+  # NEXTAUTH_URL is constructed from these in the deployment
+  NEXTAUTH_URL: 'http://localhost:3001'
+  # Database host is the Kubernetes service name for Postgres
+  POSTGRES_HOSTNAME: 'npb-db'
+  POSTGRES_PORT: '5432'
+  # Public vars
+  NEXT_PUBLIC_BASE_URL: 'http://localhost:3001'
+  NEXT_PUBLIC_POSTS_PER_PAGE: '10'
+  NEXT_PUBLIC_USERS_PER_PAGE: '10'
+  NEXT_PUBLIC_DEFAULT_THEME: 'theme-light'

@@ -1,0 +1,100 @@
+# Service gives Postgres a stable DNS name: npb-db.npb.svc.cluster.local
+# Other pods reach it simply as "npb-db" within the same namespace
+apiVersion: v1
+kind: Service
+metadata:
+  name: npb-db
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP # Only reachable inside the cluster
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app.kubernetes.io/component: database
+
+---
+# StatefulSet ensures stable pod identity and persistent storage
+# Important for databases — pods are created in order and retain their volumes
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: npb-db
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: database
+spec:
+  serviceName: npb-db
+  replicas: 1 # Single instance for dev. In production, use managed DB (RDS).
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nextjs-prisma-boilerplate
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:14.3-bullseye
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: npb-secrets
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # Health check — ensures pod is only marked Ready when Postgres is accepting connections
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - npb_user
+                - -d
+                - npb-k8s
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - npb_user
+                - -d
+                - npb-k8s
+            initialDelaySeconds: 15
+            periodSeconds: 20
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: npb-db-pvc

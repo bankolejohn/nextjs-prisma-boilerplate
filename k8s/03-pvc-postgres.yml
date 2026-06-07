@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: npb-db-pvc
+  namespace: npb
+  labels:
+    app.kubernetes.io/name: nextjs-prisma-boilerplate
+    app.kubernetes.io/component: database
+spec:
+  accessModes:
+    - ReadWriteOnce # Single node can mount this volume
+  resources:
+    requests:
+      storage: 2Gi # 2GB is plenty for dev; increase in production
+  # Minikube uses the "standard" storage class by default
+  # In AWS EKS this would be "gp3" or similar
+  storageClassName: standard
