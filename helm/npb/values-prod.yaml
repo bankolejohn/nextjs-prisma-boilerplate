@@ -1,0 +1,32 @@
+# values-prod.yaml — production overrides
+# Usage: helm install npb ./helm/npb -f ./helm/npb/values-prod.yaml
+
+app:
+  replicaCount: 3
+  image:
+    tag: latest # In real CI/CD, this is the commit SHA
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 1Gi
+
+database:
+  storage:
+    size: 10Gi
+    storageClassName: gp3 # AWS EBS gp3 volumes
+
+env:
+  APP_ENV: production
+  SITE_PROTOCOL: https
+  SITE_HOSTNAME: your-domain.com
+  NEXTAUTH_URL: https://your-domain.com
+  NEXT_PUBLIC_BASE_URL: https://your-domain.com
+
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilization: 60

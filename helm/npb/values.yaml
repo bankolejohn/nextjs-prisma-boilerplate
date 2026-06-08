@@ -1,0 +1,134 @@
+# values.yaml — default values for the npb Helm chart
+# Override these per-environment using: helm install -f values-prod.yaml
+#
+# Structure mirrors the application components:
+# app → the Next.js application
+# database → PostgreSQL
+# ingress → external traffic routing
+# autoscaling → pod scaling rules
+
+# -----------------------------------------------------------------------
+# Application (Next.js + Express)
+# -----------------------------------------------------------------------
+app:
+  name: npb-app
+  replicaCount: 2
+
+  image:
+    repository: bankolejohn/nextjs-prisma-boilerplate
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 3001
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+  # Health checks — K8s uses these to decide if a pod is alive and ready
+  probes:
+    readiness:
+      path: /api/metrics
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      failureThreshold: 3
+    liveness:
+      path: /api/metrics
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 3
+
+  # Rolling update strategy
+  strategy:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# -----------------------------------------------------------------------
+# Database (PostgreSQL)
+# -----------------------------------------------------------------------
+database:
+  name: npb-db
+  enabled: true # Set to false if using external DB (e.g. AWS RDS)
+
+  image:
+    repository: postgres
+    tag: '14.3-bullseye'
+
+  service:
+    port: 5432
+
+  storage:
+    size: 2Gi
+    storageClassName: standard # Use "gp3" on AWS EKS
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  probes:
+    timeoutSeconds: 5
+    livenessInitialDelay: 30
+    livenessPeriod: 30
+    failureThreshold: 5
+
+# -----------------------------------------------------------------------
+# Environment variables
+# -----------------------------------------------------------------------
+env:
+  APP_ENV: kubernetes
+  SITE_PROTOCOL: http
+  SITE_HOSTNAME: localhost
+  PORT: '3001'
+  NEXTAUTH_URL: http://localhost:3001
+  NEXT_PUBLIC_BASE_URL: http://localhost:3001
+  NEXT_PUBLIC_POSTS_PER_PAGE: '10'
+  NEXT_PUBLIC_USERS_PER_PAGE: '10'
+  NEXT_PUBLIC_DEFAULT_THEME: theme-light
+
+# -----------------------------------------------------------------------
+# Secrets (base64 encoded)
+# In production, use External Secrets Operator or Sealed Secrets instead
+# -----------------------------------------------------------------------
+secrets:
+  POSTGRES_USER: bnBiX3VzZXI= # npb_user
+  POSTGRES_PASSWORD: cGFzc3dvcmQxMjM= # password123
+  POSTGRES_DB: bnBiLWs4cw== # npb-k8s
+  SECRET: cmFuZG9tLXNlY3JldC1jaGFuZ2UtbWU= # random-secret-change-me
+
+# -----------------------------------------------------------------------
+# Ingress (external traffic routing)
+# -----------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: '10m'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '60'
+  hosts:
+    - paths:
+        - path: /
+          pathType: Prefix
+
+# -----------------------------------------------------------------------
+# Autoscaling (HorizontalPodAutoscaler)
+# -----------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilization: 70
+
+# -----------------------------------------------------------------------
+# Namespace
+# -----------------------------------------------------------------------
+namespace: npb

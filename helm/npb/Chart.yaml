@@ -1,0 +1,16 @@
+# Chart.yaml — metadata about this Helm chart
+# This is like package.json for your K8s deployment
+
+apiVersion: v2 # Helm chart API version (v2 = Helm 3)
+name: npb # Chart name — used in `helm install npb ./helm/npb`
+version: 1.0.0 # Chart version — bump this when you change chart structure
+appVersion: '1.0.0' # App version — bump this when you deploy new app code
+description: 'Helm chart for nextjs-prisma-boilerplate production deployment'
+type: application # 'application' = deploys something. 'library' = reusable helpers only
+keywords:
+  - nextjs
+  - prisma
+  - postgres
+  - devops
+maintainers:
+  - name: Bankole John

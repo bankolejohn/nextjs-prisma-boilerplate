@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.app.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "npb.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.app.service.type }}
+  ports:
+    - port: {{ .Values.app.service.port }}
+      targetPort: {{ .Values.app.service.port }}
+      protocol: TCP
+  selector:
+    {{- include "npb.selectorLabels.app" . | nindent 4 }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.app.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "npb.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.app.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "npb.selectorLabels.app" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.app.strategy.maxUnavailable }}
+      maxSurge: {{ .Values.app.strategy.maxSurge }}
+  template:
+    metadata:
+      labels:
+        {{- include "npb.selectorLabels.app" . | nindent 8 }}
+    spec:
+      containers:
+        - name: app
+          image: "{{ .Values.app.image.repository }}:{{ .Values.app.image.tag }}"
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.app.service.port }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_DB
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@{{ .Values.database.name }}:{{ .Values.database.service.port }}/$(POSTGRES_DB)?schema=public&connection_limit=10&pool_timeout=20"
+            - name: SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: SECRET
+            # Non-secret env vars from ConfigMap
+            - name: NEXTAUTH_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: NEXTAUTH_URL
+            - name: SITE_PROTOCOL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: SITE_PROTOCOL
+            - name: SITE_HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: SITE_HOSTNAME
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: PORT
+            - name: APP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: APP_ENV
+            - name: NEXT_PUBLIC_POSTS_PER_PAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: NEXT_PUBLIC_POSTS_PER_PAGE
+            - name: NEXT_PUBLIC_USERS_PER_PAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "npb.fullname" . }}-config
+                  key: NEXT_PUBLIC_USERS_PER_PAGE
+            - name: FACEBOOK_CLIENT_ID
+              value: ""
+            - name: FACEBOOK_CLIENT_SECRET
+              value: ""
+            - name: GOOGLE_CLIENT_ID
+              value: ""
+            - name: GOOGLE_CLIENT_SECRET
+              value: ""
+          resources:
+            {{- toYaml .Values.app.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.app.probes.readiness.path }}
+              port: {{ .Values.app.service.port }}
+            initialDelaySeconds: {{ .Values.app.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.app.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.app.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.app.probes.liveness.path }}
+              port: {{ .Values.app.service.port }}
+            initialDelaySeconds: {{ .Values.app.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.app.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.app.probes.liveness.failureThreshold }}

@@ -1,0 +1,101 @@
+{{- if .Values.database.enabled }}
+# Only deploy Postgres if database.enabled=true
+# Set to false when using an external managed database like AWS RDS
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.database.name }}-pvc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "npb.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.database.storage.size }}
+  storageClassName: {{ .Values.database.storage.storageClassName }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.database.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "npb.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.database.service.port }}
+      targetPort: {{ .Values.database.service.port }}
+      protocol: TCP
+  selector:
+    {{- include "npb.selectorLabels.database" . | nindent 4 }}
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.database.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "npb.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Values.database.name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "npb.selectorLabels.database" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "npb.selectorLabels.database" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.database.image.repository }}:{{ .Values.database.image.tag }}"
+          ports:
+            - containerPort: {{ .Values.database.service.port }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "npb.fullname" . }}-secrets
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            {{- toYaml .Values.database.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "npb_user", "-d", "npb-k8s"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: {{ .Values.database.probes.timeoutSeconds }}
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "npb_user", "-d", "npb-k8s"]
+            initialDelaySeconds: {{ .Values.database.probes.livenessInitialDelay }}
+            periodSeconds: {{ .Values.database.probes.livenessPeriod }}
+            timeoutSeconds: {{ .Values.database.probes.timeoutSeconds }}
+            failureThreshold: {{ .Values.database.probes.failureThreshold }}
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.database.name }}-pvc
+{{- end }}
