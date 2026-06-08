@@ -1,0 +1,49 @@
+# This resource tells ArgoCD to watch the k8s/ folder in this repo
+# and automatically deploy/sync changes to the Minikube cluster.
+#
+# How it works:
+# 1. You push a change to k8s/ manifests on the target branch
+# 2. ArgoCD detects the Git diff within 3 minutes (or instantly on manual sync)
+# 3. ArgoCD applies the changes to the cluster
+# 4. If anything drifts (manual kubectl edit), ArgoCD reverts it
+#
+# Apply this with: kubectl apply -f k8s/argocd-application.yml
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: npb-app
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    # Your GitHub repository
+    repoURL: https://github.com/bankolejohn/nextjs-prisma-boilerplate.git
+    # Branch to watch
+    targetRevision: feature/kubernetes-phase7
+    # Folder containing K8s manifests
+    path: k8s
+    directory:
+      # Exclude this ArgoCD application file to avoid circular dependency
+      exclude: 'argocd-application.yml'
+
+  destination:
+    # Deploy to the local cluster (Minikube)
+    server: https://kubernetes.default.svc
+    # Target namespace — ArgoCD will create resources in the npb namespace
+    namespace: npb
+
+  syncPolicy:
+    automated:
+      # Automatically apply changes when Git changes (no manual sync needed)
+      selfHeal: true # Revert manual changes — Git is the source of truth
+      prune: true # Delete resources that are removed from Git
+    syncOptions:
+      - CreateNamespace=true # Create the npb namespace if it doesn't exist
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

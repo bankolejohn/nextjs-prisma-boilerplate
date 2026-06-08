@@ -27,7 +27,7 @@ metadata:
     app.kubernetes.io/name: nextjs-prisma-boilerplate
     app.kubernetes.io/component: app
 spec:
-  replicas: 2 # Run 2 copies for availability
+  replicas: 3 # Scaled up to test ArgoCD auto-sync
   selector:
     matchLabels:
       app.kubernetes.io/component: app
