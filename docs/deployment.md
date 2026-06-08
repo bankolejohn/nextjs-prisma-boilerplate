@@ -16,9 +16,11 @@
 3. [Phase 2 — Containerization](#3-phase-2--containerization)
 4. [Phase 3 — EC2 Deployment with Docker](#4-phase-3--ec2-deployment-with-docker)
 5. [Phase 4 — CI/CD with GitHub Actions](#5-phase-4--cicd-with-github-actions)
-6. [Observability — Prometheus and Grafana](#6-observability--prometheus-and-grafana)
-7. [Troubleshooting Reference](#7-troubleshooting-reference)
-8. [Architecture Summary](#8-architecture-summary)
+6. [Phase 5 — Infrastructure as Code (Terraform)](#6-phase-5--infrastructure-as-code-terraform)
+7. [Phase 6 — Observability (Prometheus, Grafana, Alerts)](#7-phase-6--observability-prometheus-grafana-alerts)
+8. [Phase 7 — Kubernetes (Minikube)](#8-phase-7--kubernetes-minikube)
+9. [Troubleshooting Reference](#9-troubleshooting-reference)
+10. [Architecture Summary](#10-architecture-summary)
 
 ---
 
@@ -635,21 +637,560 @@ The planned evolution as the system grows:
 
 ---
 
-## 6. Observability — Prometheus and Grafana
+## 6. Phase 5 — Infrastructure as Code (Terraform)
 
-Prometheus and Grafana are included in `docker-compose.dev.yml` for local development observability. They are not currently part of the production `docker-compose.prod.yml`.
+### Goal
 
-| Service          | URL                                 | Purpose                      |
-| ---------------- | ----------------------------------- | ---------------------------- |
-| Prometheus       | `http://localhost:9090`             | Metrics storage and querying |
-| Grafana          | `http://localhost:3002`             | Dashboards and visualisation |
-| Metrics endpoint | `http://localhost:3001/api/metrics` | Raw Prometheus metrics       |
+Replace all manual AWS console clicks with version-controlled code. If the server dies or you need a second environment, run one command and everything rebuilds in minutes.
 
-Default metrics exposed include Node.js process CPU, memory, event loop lag, and the custom `http_requests_total` counter.
+### What Terraform Provisions
+
+```
+infra/terraform/
+├── main.tf               # Provider config, Ubuntu 24.04 AMI data source
+├── variables.tf          # All input variables with defaults
+├── networking.tf         # VPC, subnet, internet gateway, route table
+├── security.tf           # Security group (firewall rules)
+├── compute.tf            # EC2 instance, Elastic IP, SSH key pair, user data
+├── outputs.tf            # Outputs (IP, SSH command, app URL)
+├── terraform.tfvars.example  # Template for your actual values
+└── .gitignore            # Excludes state files and secrets
+```
+
+### Resources Created
+
+| Resource                    | Purpose                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| VPC (10.0.0.0/16)           | Isolated network for all resources                           |
+| Public subnet (10.0.1.0/24) | Holds the EC2 instance                                       |
+| Internet Gateway            | Connects the VPC to the internet                             |
+| Route Table                 | Routes all outbound traffic through the IGW                  |
+| Security Group              | Firewall: SSH (your IP), HTTP/HTTPS (public), 3001 (your IP) |
+| EC2 Instance (t3.small)     | Ubuntu 24.04, 20GB gp3 volume                                |
+| Elastic IP                  | Static public IP that survives reboots                       |
+| Key Pair                    | Registers your SSH public key                                |
+
+### Prerequisites
+
+```bash
+# Install Terraform (macOS)
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
+terraform -v
+
+# Configure AWS CLI
+aws configure
+# Enter: Access Key ID, Secret Access Key, region: us-east-1, format: json
+
+# Verify credentials
+aws sts get-caller-identity
+```
+
+### Setup
+
+```bash
+cd infra/terraform
+
+# Copy the example and fill in your values
+cp terraform.tfvars.example terraform.tfvars
+nano terraform.tfvars
+
+# Generate SSH public key from your .pem file
+ssh-keygen -y -f ~/.ssh/npb-prod-key.pem > ~/.ssh/npb-prod-key.pub
+
+# Get your current IP for SSH restriction
+curl ifconfig.me
+# Set allowed_ssh_cidr = "YOUR_IP/32" in terraform.tfvars
+```
+
+### Usage
+
+```bash
+# Initialise Terraform (downloads AWS provider)
+terraform init
+
+# Preview what will be created (nothing happens yet)
+terraform plan
+
+# Create all resources
+terraform apply
+
+# Outputs include:
+# - elastic_ip
+# - ssh_command
+# - app_url
+```
+
+### User Data Bootstrap
+
+The EC2 instance runs a bootstrap script on first boot that:
+
+1. Updates the system
+2. Installs Docker, Nginx, Git
+3. Adds the `ubuntu` user to the Docker group
+4. Enables Docker and Nginx on boot
+5. Creates the required `proxy` Docker network
+6. Clones the application repository
+7. Configures Nginx as a reverse proxy
+
+After boot, the only manual step is creating the env file with secrets. The CI/CD pipeline handles everything else.
+
+### Destroying Infrastructure
+
+```bash
+# Remove all resources Terraform created
+terraform destroy
+```
+
+This deletes the VPC, EC2, Elastic IP — everything. Use with caution.
+
+### State Management
+
+Terraform stores infrastructure state in `terraform.tfstate`. This file tracks what resources exist and is required for updates and destroys.
+
+- **Local state (current):** State lives on your machine. If lost, Terraform loses track of resources.
+- **Remote state (recommended for teams):** Store state in S3 with DynamoDB locking. Config is commented out in `main.tf` — uncomment after creating the S3 bucket.
 
 ---
 
-## 7. Troubleshooting Reference
+## 7. Phase 6 — Observability (Prometheus, Grafana, Alerts)
+
+### Goal
+
+Move from "I think the app is working" to "I can prove the app is healthy and know immediately when it isn't." Add metrics, dashboards, latency tracking, and alert rules.
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  EC2 Server                                                     │
+│                                                                 │
+│  npb-app-prod ─── /api/metrics ──┐                             │
+│                                   │ scrape every 15s            │
+│                                   ▼                             │
+│                            Prometheus ──── Alert Rules           │
+│                                   │                             │
+│                                   │ data source                 │
+│                                   ▼                             │
+│                              Grafana ──── Dashboards            │
+│                                                                 │
+│  Ports (127.0.0.1 only — not exposed to internet):             │
+│  - Prometheus: localhost:9090                                    │
+│  - Grafana: localhost:3002                                       │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### What Gets Measured
+
+**Default Node.js metrics** (collected automatically by prom-client):
+
+- `process_cpu_user_seconds_total` — CPU usage
+- `nodejs_heap_size_used_bytes` — Memory usage
+- `nodejs_eventloop_lag_seconds` — Event loop health
+- `nodejs_gc_duration_seconds` — Garbage collection
+
+**Custom application metrics** (added by our code):
+
+- `http_requests_total` — Counter: total requests by method, route, status code
+- `http_request_duration_seconds` — Histogram: response latency in seconds with percentile buckets
+
+### How Metrics Instrumentation Works
+
+Every API route is automatically instrumented via middleware in `lib-server/nc.ts`:
+
+```typescript
+const metricsMiddleware = (req, res, next) => {
+  const startTime = Date.now();
+  const method = req.method || 'GET';
+  const route = req.url?.replace(/\/\d+/g, '/[id]').split('?')[0] || 'unknown';
+
+  // Intercept res.end to capture the REAL status code after handler finishes
+  const originalEnd = res.end.bind(res);
+  res.end = (...args) => {
+    const statusCode = String(res.statusCode || 200);
+    const durationSeconds = (Date.now() - startTime) / 1000;
+
+    httpRequestsTotal.inc({ method, route, status_code: statusCode });
+    httpRequestDurationSeconds.observe(
+      { method, route, status_code: statusCode },
+      durationSeconds
+    );
+
+    return originalEnd(...args);
+  };
+
+  next();
+};
+```
+
+Key design decisions:
+
+- Intercepts `res.end` instead of recording at middleware entry — captures accurate status codes including errors
+- Normalises dynamic route segments (`/api/posts/123` → `/api/posts/[id]`) — prevents cardinality explosion
+- Wrapped in try/catch — metrics never break a request
+
+### Alert Rules
+
+Location: `observability/prometheus/rules/alerts.yml`
+
+| Alert             | Condition                                        | Severity | Meaning                      |
+| ----------------- | ------------------------------------------------ | -------- | ---------------------------- |
+| `HighErrorRate`   | >5% of requests return 5xx over 5 minutes        | critical | Application is failing       |
+| `HighLatency`     | p95 latency >2 seconds for 5 minutes             | warning  | Performance degradation      |
+| `AppDown`         | Prometheus can't reach /api/metrics for 1 minute | critical | App crashed or network issue |
+| `HighMemoryUsage` | Node.js heap >400MB for 5 minutes                | warning  | Possible memory leak         |
+
+### Grafana Dashboard
+
+A pre-built dashboard auto-loads at startup with 6 panels:
+
+1. **Request Rate** — requests/second by route
+2. **Error Rate** — percentage of 5xx responses
+3. **p50/p95/p99 Latency** — response time percentiles
+4. **Heap Memory** — used vs total heap in MB
+5. **Requests by Status Code** — 200, 404, 500, etc.
+6. **Event Loop Lag** — Node.js event loop health
+
+### Accessing Observability in Production
+
+Prometheus and Grafana are bound to `127.0.0.1` — not exposed to the internet. Access them via SSH tunnel:
+
+```bash
+# Grafana
+ssh -i ~/.ssh/npb-prod-key.pem -L 3002:localhost:3002 ubuntu@<ELASTIC_IP> -N
+# Open http://localhost:3002 — login: admin / admin
+
+# Prometheus
+ssh -i ~/.ssh/npb-prod-key.pem -L 9090:localhost:9090 ubuntu@<ELASTIC_IP> -N
+# Open http://localhost:9090
+```
+
+### Useful PromQL Queries
+
+```promql
+# Total requests in the last hour
+sum(increase(http_requests_total[1h]))
+
+# Current request rate (req/sec)
+sum(rate(http_requests_total[5m]))
+
+# p95 latency
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# Error rate as percentage
+100 * sum(rate(http_requests_total{status_code=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))
+
+# Slowest routes (p95 by route)
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, route))
+
+# Heap memory in MB
+nodejs_heap_size_used_bytes / 1024 / 1024
+
+# Is the app up? (1 = yes, 0 = no)
+up{job="nextjs-app"}
+```
+
+### Load Testing
+
+Generate traffic to see metrics in action:
+
+```bash
+# Install a load testing tool (macOS)
+brew install hey
+
+# 200 requests, 10 concurrent to homepage
+hey -n 200 -c 10 http://<ELASTIC_IP>/
+
+# 100 requests to API
+hey -n 100 -c 5 http://<ELASTIC_IP>/api/posts/
+
+# Generate 404 errors
+hey -n 50 -c 5 http://<ELASTIC_IP>/api/posts/99999/
+```
+
+### Simulating an Incident
+
+Stop the app container and observe how metrics respond:
+
+```bash
+# On EC2 server
+docker stop npb-app-prod
+
+# In Prometheus, check:
+up{job="nextjs-app"}   # shows 0
+
+# AppDown alert fires after 1 minute
+# Check: http://localhost:9090/alerts
+
+# Restore
+docker start npb-app-prod
+```
+
+### What Healthy Metrics Look Like
+
+| Metric         | Healthy                          | Warning     | Critical |
+| -------------- | -------------------------------- | ----------- | -------- |
+| Request rate   | Stable, matches expected traffic | Sudden drop | Zero     |
+| p95 latency    | < 500ms                          | 500ms - 2s  | > 2s     |
+| Error rate     | < 1%                             | 1% - 5%     | > 5%     |
+| Heap memory    | < 200MB                          | 200-400MB   | > 400MB  |
+| Event loop lag | < 50ms                           | 50-200ms    | > 200ms  |
+| `up` target    | 1                                | —           | 0        |
+
+---
+
+## 8. Phase 7 — Kubernetes (Minikube)
+
+### Goal
+
+Deploy the same application to Kubernetes, understanding pods, services, deployments, ingress, secrets, configmaps, persistent volumes, health probes, and autoscaling. Start locally with Minikube before moving to a managed cluster.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│                   Kubernetes Cluster                   │
+│                                                       │
+│  ┌─────────────┐    ┌─────────────────────────────┐  │
+│  │   Ingress   │───▶│  Service: npb-app            │  │
+│  │  (port 80)  │    │  (ClusterIP, port 3001)      │  │
+│  └─────────────┘    └────────────┬────────────────┘  │
+│                                  │                    │
+│                     ┌────────────┼────────────┐      │
+│                     ▼            ▼            ▼       │
+│               ┌─────────┐ ┌─────────┐ ┌─────────┐   │
+│               │  Pod 1  │ │  Pod 2  │ │  Pod 3  │   │
+│               │ npb-app │ │ npb-app │ │ npb-app │   │
+│               └─────────┘ └─────────┘ └─────────┘   │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │  StatefulSet: npb-db (PostgreSQL)               │  │
+│  │  Service: npb-db (ClusterIP, port 5432)         │  │
+│  │  PersistentVolumeClaim: 2Gi                     │  │
+│  └─────────────────────────────────────────────────┘  │
+│                                                       │
+│  ┌──────────────┐  ┌──────────────┐                  │
+│  │  ConfigMap   │  │   Secret     │                  │
+│  │ (env vars)   │  │ (DB creds)  │                  │
+│  └──────────────┘  └──────────────┘                  │
+│                                                       │
+│  ┌──────────────────────────────────────────────────┐ │
+│  │  HorizontalPodAutoscaler                         │ │
+│  │  min: 2 pods, max: 5 pods, target: 70% CPU      │ │
+│  └──────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
+```
+
+### Prerequisites
+
+```bash
+# Install Minikube (local K8s cluster)
+brew install minikube
+
+# Install kubectl (K8s CLI)
+brew install kubectl
+
+# Start Minikube with adequate resources
+minikube start --driver=docker --memory=4096 --cpus=2
+
+# Enable required addons
+minikube addons enable ingress
+minikube addons enable metrics-server
+
+# Verify
+kubectl cluster-info
+kubectl get nodes
+```
+
+### Manifest Files
+
+```
+k8s/
+├── 00-namespace.yml        # Isolates app from system resources
+├── 01-secret.yml           # DB credentials, JWT secret (base64 encoded)
+├── 02-configmap.yml        # Non-secret environment variables
+├── 03-pvc-postgres.yml     # 2GB persistent disk for Postgres
+├── 04-postgres.yml         # StatefulSet + Service for PostgreSQL
+├── 05-app.yml              # Deployment (2 replicas) + Service for Next.js
+├── 06-migration-job.yml    # One-time Job for Prisma migrations
+├── 07-ingress.yml          # Routes external traffic to the app
+└── 08-hpa.yml              # Auto-scales pods based on CPU
+```
+
+### Deploying Step by Step
+
+```bash
+# 1. Create the namespace
+kubectl apply -f k8s/00-namespace.yml
+
+# 2. Create secrets and config
+kubectl apply -f k8s/01-secret.yml
+kubectl apply -f k8s/02-configmap.yml
+
+# 3. Create persistent storage
+kubectl apply -f k8s/03-pvc-postgres.yml
+
+# 4. Deploy PostgreSQL
+kubectl apply -f k8s/04-postgres.yml
+# Wait for it to be ready
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=database -n npb --timeout=120s
+
+# 5. Run database migrations
+kubectl apply -f k8s/06-migration-job.yml
+kubectl wait --for=condition=complete job/npb-migrate -n npb --timeout=120s
+
+# 6. Deploy the application
+kubectl apply -f k8s/05-app.yml
+
+# 7. Set up ingress
+kubectl apply -f k8s/07-ingress.yml
+
+# 8. Enable autoscaling
+kubectl apply -f k8s/08-hpa.yml
+```
+
+### Accessing the App
+
+```bash
+# Get the Minikube IP
+minikube ip
+
+# Access the app
+curl http://$(minikube ip)/
+
+# Or open in browser
+open http://$(minikube ip)/
+```
+
+### Key Kubernetes Concepts Used
+
+| Concept                     | What it does                   | Why we need it                                 |
+| --------------------------- | ------------------------------ | ---------------------------------------------- |
+| **Namespace**               | Logical isolation              | Keeps our resources separate from system pods  |
+| **Secret**                  | Stores sensitive data (base64) | DB passwords, JWT tokens — never in ConfigMap  |
+| **ConfigMap**               | Non-secret key-value pairs     | App configuration that isn't sensitive         |
+| **PersistentVolumeClaim**   | Requests disk storage          | Database data survives pod restarts            |
+| **StatefulSet**             | Pod with stable identity       | Database needs consistent name and volume      |
+| **Deployment**              | Manages replica pods           | App runs as 2+ copies for availability         |
+| **Service (ClusterIP)**     | Internal DNS + load balancing  | Pods find each other by name                   |
+| **Ingress**                 | External HTTP routing          | Maps port 80 to the app service                |
+| **Job**                     | Run-once task                  | Database migrations run once, not in every pod |
+| **HorizontalPodAutoscaler** | Auto-scales replicas           | Adds pods under load, removes when idle        |
+
+### Health Probes
+
+Every pod has two probes:
+
+**Readiness probe** — "Is this pod ready to receive traffic?"
+
+- Kubernetes only sends traffic to pods that pass readiness
+- If a pod fails, it's removed from the service until it recovers
+
+**Liveness probe** — "Is this pod alive?"
+
+- If a pod fails liveness, Kubernetes kills and restarts it
+- Catches zombie processes that are running but not responding
+
+```yaml
+# App: HTTP check on /api/metrics
+readinessProbe:
+  httpGet:
+    path: /api/metrics
+    port: 3001
+  initialDelaySeconds: 10
+  periodSeconds: 5
+
+# Postgres: pg_isready command
+readinessProbe:
+  exec:
+    command: ["pg_isready", "-U", "npb_user", "-d", "npb-k8s"]
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+```
+
+### Autoscaling Behaviour
+
+```yaml
+minReplicas: 2 # Always at least 2 pods (availability)
+maxReplicas: 5 # Never more than 5 (cost control)
+targetCPUUtilization: 70% # Scale up when average CPU > 70%
+
+scaleUp:
+  stabilizationWindow: 30s # React quickly to load spikes
+  maxPodsPerMinute: 2 # Add up to 2 pods per minute
+
+scaleDown:
+  stabilizationWindow: 300s # Wait 5 min before scaling down
+  maxPodsPerMinute: 1 # Remove max 1 pod per minute
+```
+
+### Useful kubectl Commands
+
+```bash
+# See all resources in our namespace
+kubectl get all -n npb
+
+# Check pod status and events
+kubectl describe pod <pod-name> -n npb
+
+# View pod logs
+kubectl logs <pod-name> -n npb
+kubectl logs -f deployment/npb-app -n npb  # follow logs
+
+# Execute a command inside a pod
+kubectl exec -it <pod-name> -n npb -- sh
+
+# Scale manually
+kubectl scale deployment npb-app -n npb --replicas=3
+
+# Check autoscaler status
+kubectl get hpa -n npb
+
+# Delete everything and start fresh
+kubectl delete namespace npb
+```
+
+### Docker Compose vs Kubernetes — Translation
+
+| Docker Compose            | Kubernetes Equivalent             |
+| ------------------------- | --------------------------------- |
+| `services:`               | Deployment + Service              |
+| `volumes:`                | PersistentVolumeClaim             |
+| `env_file:`               | ConfigMap + Secret                |
+| `ports: "80:3001"`        | Service + Ingress                 |
+| `depends_on:`             | InitContainers or readiness gates |
+| `restart: unless-stopped` | Pod restartPolicy + Deployment    |
+| `docker-compose up -d`    | `kubectl apply -f k8s/`           |
+| `docker-compose down`     | `kubectl delete namespace npb`    |
+
+### Troubleshooting: Postgres Liveness Probe Timeout
+
+**Error:**
+
+```
+Liveness probe failed: command timed out: "pg_isready -U npb_user -d npb-k8s" timed out after 1s
+```
+
+**Cause:** Minikube has limited resources. Under memory/CPU pressure, Postgres can take more than 1 second to respond to `pg_isready`, causing the probe to time out and K8s to restart the pod.
+
+**Fix:** Increase timeout and reduce probe frequency:
+
+```yaml
+livenessProbe:
+  exec:
+    command: ['pg_isready', '-U', 'npb_user', '-d', 'npb-k8s']
+  initialDelaySeconds: 30 # Give Postgres time to start
+  periodSeconds: 30 # Check less frequently
+  timeoutSeconds: 5 # Allow 5 seconds to respond
+  failureThreshold: 5 # 5 failures before restart (2.5 min tolerance)
+```
+
+This is a Minikube-specific issue. On a real cluster with proper resource allocation, the default 1-second timeout works fine.
+
+---
+
+## 9. Troubleshooting Reference
 
 ### `react-hook-form` engine incompatibility during Docker build
 
@@ -826,7 +1367,47 @@ docker network create proxy
 
 ---
 
-## 8. Architecture Summary
+### Duplicate identifier `NextApiRequestWithResult` in nc.ts
+
+**Error:**
+
+```
+Type error: Duplicate identifier 'NextApiRequestWithResult'.
+```
+
+**Cause:** The `ssrNcHandler` block and its type export were accidentally duplicated in `lib-server/nc.ts`, resulting in two identical type declarations.
+
+**Fix:** Remove the duplicate block. The file should only contain one `export type NextApiRequestWithResult<T>` and one `export const ssrNcHandler`.
+
+---
+
+### Kubernetes: Postgres liveness probe timeout in Minikube
+
+**Error:**
+
+```
+Liveness probe failed: command timed out: "pg_isready -U npb_user -d npb-k8s" timed out after 1s
+```
+
+**Cause:** Minikube runs with limited CPU and memory. Under resource pressure, Postgres responds slower than the default 1-second timeout.
+
+**Fix:** Increase `timeoutSeconds` and `periodSeconds`, add `failureThreshold`:
+
+```yaml
+livenessProbe:
+  exec:
+    command: ['pg_isready', '-U', 'npb_user', '-d', 'npb-k8s']
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 5
+```
+
+This is a local resource constraint — not an issue on production clusters with dedicated resource allocation.
+
+---
+
+## 10. Architecture Summary
 
 ### Request Flow (Production)
 
