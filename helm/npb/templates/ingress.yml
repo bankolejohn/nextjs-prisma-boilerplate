@@ -5,16 +5,32 @@ metadata:
   name: {{ include "npb.fullname" . }}-ingress
   namespace: {{ .Values.namespace }}
   labels:
-    {{- include "npb.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+{{- include "npb.labels" . | nindent 4 }}
   annotations:
+    {{- if .Values.tls.enabled }}
+    # Tell cert-manager to manage the certificate for this Ingress
+    cert-manager.io/cluster-issuer: {{ .Values.tls.issuerName | quote }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.tls.enabled }}
+  # TLS section — Ingress reads the cert from this Secret and serves HTTPS
+  tls:
+    - secretName: {{ include "npb.fullname" . }}-tls-secret
+      hosts:
+        {{- range .Values.tls.domains }}
+        - {{ . | quote }}
+        {{- end }}
+  {{- end }}
   rules:
     {{- range .Values.ingress.hosts }}
-    - http:
+    - {{- if $.Values.tls.enabled }}
+      host: {{ index $.Values.tls.domains 0 }}
+      {{- end }}
+      http:
         paths:
           {{- range .paths }}
           - path: {{ .path }}

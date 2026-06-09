@@ -129,6 +129,20 @@ autoscaling:
   targetCPUUtilization: 70
 
 # -----------------------------------------------------------------------
+# TLS / SSL (cert-manager)
+# -----------------------------------------------------------------------
+tls:
+  enabled: true
+  # "self-signed" for local dev (Minikube), "letsencrypt" for production
+  issuerType: self-signed
+  issuerName: selfsigned-issuer
+  # Your email (required for Let's Encrypt, ignored for self-signed)
+  email: ''
+  # Domain names for the certificate
+  domains:
+    - npb.local
+
+# -----------------------------------------------------------------------
 # Namespace
 # -----------------------------------------------------------------------
 namespace: npb

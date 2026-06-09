@@ -1,0 +1,62 @@
+{{- if .Values.tls.enabled }}
+---
+# ClusterIssuer — tells cert-manager HOW to get certificates
+# selfSigned: for local development (Minikube)
+# letsencrypt: for production (real domain required)
+
+{{- if eq .Values.tls.issuerType "self-signed" }}
+# Self-signed issuer — generates certificates locally without contacting Let's Encrypt
+# Browsers will show a security warning, but TLS encryption still works
+# Use this for local development and testing
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.tls.issuerName }}
+spec:
+  selfSigned: {}
+{{- end }}
+
+{{- if eq .Values.tls.issuerType "letsencrypt" }}
+# Let's Encrypt issuer — production certificates trusted by all browsers
+# Requires: a real domain pointing to your cluster's public IP
+# cert-manager will automatically:
+#   1. Create a temporary Ingress to prove domain ownership (HTTP-01 challenge)
+#   2. Receive the signed certificate from Let's Encrypt
+#   3. Store it as a Kubernetes Secret
+#   4. Renew it 30 days before expiry
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.tls.issuerName }}
+spec:
+  acme:
+    # Let's Encrypt production endpoint
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Your email — Let's Encrypt sends expiry warnings here
+    email: {{ .Values.tls.email }}
+    privateKeySecretRef:
+      name: letsencrypt-private-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+{{- end }}
+
+---
+# Certificate — requests a TLS certificate for your domain
+# cert-manager watches this resource and provisions the cert automatically
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "npb.fullname" . }}-tls
+  namespace: {{ .Values.namespace }}
+spec:
+  secretName: {{ include "npb.fullname" . }}-tls-secret
+  issuerRef:
+    name: {{ .Values.tls.issuerName }}
+    kind: ClusterIssuer
+  dnsNames:
+    {{- range .Values.tls.domains }}
+    - {{ . | quote }}
+    {{- end }}
+{{- end }}

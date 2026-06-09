@@ -30,3 +30,11 @@ autoscaling:
   minReplicas: 3
   maxReplicas: 10
   targetCPUUtilization: 60
+
+tls:
+  enabled: true
+  issuerType: letsencrypt
+  issuerName: letsencrypt-prod
+  email: your-email@example.com
+  domains:
+    - npb.yourdomain.com
