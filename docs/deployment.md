@@ -20,7 +20,10 @@
 7. [Phase 6 — Observability (Prometheus, Grafana, Alerts)](#7-phase-6--observability-prometheus-grafana-alerts)
 8. [Phase 7 — Kubernetes (Minikube)](#8-phase-7--kubernetes-minikube)
 9. [Troubleshooting Reference](#9-troubleshooting-reference)
-10. [Architecture Summary](#10-architecture-summary)
+10. [Phase 8 — ArgoCD (GitOps)](#10-phase-8--argocd-gitops-continuous-delivery)
+11. [Phase 9 — Helm Charts](#11-phase-9--helm-charts-kubernetes-package-management)
+12. [Phase 10 — SSL/TLS with cert-manager](#12-phase-10--ssltls-with-cert-manager)
+13. [Architecture Summary](#13-architecture-summary)
 
 ---
 
@@ -1407,7 +1410,325 @@ This is a local resource constraint — not an issue on production clusters with
 
 ---
 
-## 10. Architecture Summary
+## 10. Phase 8 — ArgoCD (GitOps Continuous Delivery)
+
+### Goal
+
+Replace push-based deployment (pipeline SSHs into server and runs commands) with pull-based GitOps. The Git repository becomes the single source of truth — the cluster automatically syncs itself to match what's in Git.
+
+### How GitOps Differs from Traditional CI/CD
+
+```
+Traditional (Phase 4):
+  Push to main → Pipeline builds image → Pipeline SSHs into server → Runs commands
+
+GitOps (ArgoCD):
+  Push to main → Pipeline builds image → Updates K8s manifests in Git
+                                                      │
+                                              ArgoCD watches Git
+                                                      │
+                                              Cluster syncs automatically
+```
+
+No SSH keys. No pipeline touching the cluster. No imperative commands. Declarative state in Git = actual state in the cluster.
+
+### Key Benefits
+
+- **Audit trail** — every deployment is a Git commit with author, timestamp, and diff
+- **Drift detection** — if someone manually changes something, ArgoCD reverts it
+- **Easy rollback** — `git revert` the commit, cluster follows
+- **Self-healing** — cluster always converges to the state defined in Git
+
+### Installation
+
+```bash
+# Create ArgoCD namespace
+kubectl create namespace argocd
+
+# Install ArgoCD
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# Wait for all pods to be ready
+kubectl wait --for=condition=ready pod --all -n argocd --timeout=300s
+```
+
+### Accessing the UI
+
+```bash
+# Port-forward to localhost
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+
+# Get admin password
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 --decode
+
+# Open https://localhost:8080
+# Login: admin / <password from above>
+```
+
+### Installing the CLI
+
+```bash
+# Download binary directly (no brew needed)
+curl -sSL -o /usr/local/bin/argocd \
+  https://github.com/argoproj/argo-cd/releases/latest/download/argocd-darwin-amd64
+chmod +x /usr/local/bin/argocd
+
+# Login
+argocd login localhost:8080 --insecure --username admin \
+  --password $(kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 --decode)
+```
+
+### Creating an ArgoCD Application
+
+The Application resource tells ArgoCD what to watch and where to deploy:
+
+```yaml
+# k8s/argocd-application.yml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: npb-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/bankolejohn/nextjs-prisma-boilerplate.git
+    targetRevision: feature/kubernetes-phase7
+    path: k8s
+    directory:
+      exclude: 'argocd-application.yml'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: npb
+  syncPolicy:
+    automated:
+      selfHeal: true # Revert manual changes
+      prune: true # Delete resources removed from Git
+    syncOptions:
+      - CreateNamespace=true
+```
+
+Apply it:
+
+```bash
+kubectl apply -f k8s/argocd-application.yml
+```
+
+### Testing GitOps
+
+**Auto-sync test:** Change `replicas` in `k8s/05-app.yml`, push to Git. ArgoCD deploys the change within 3 minutes without running any commands.
+
+**Self-heal test:** Manually scale down:
+
+```bash
+kubectl scale deployment npb-app -n npb --replicas=1
+```
+
+ArgoCD detects the drift and scales it back to the Git-defined value within seconds.
+
+---
+
+## 11. Phase 9 — Helm Charts (Kubernetes Package Management)
+
+### Goal
+
+Package all K8s manifests into a reusable, configurable Helm chart. Deploy the same application to any environment (dev/staging/prod) by swapping a values file.
+
+### Why Helm Over Raw Manifests
+
+| Raw Manifests                          | Helm                                  |
+| -------------------------------------- | ------------------------------------- |
+| 9 separate files with hardcoded values | One chart, values per environment     |
+| `kubectl apply` each file individually | `helm install` deploys everything     |
+| No version tracking                    | `helm history` shows every release    |
+| Manual rollback (find old YAML)        | `helm rollback npb-release 1`         |
+| Duplicate files for each environment   | `values-dev.yaml`, `values-prod.yaml` |
+
+### Chart Structure
+
+```
+helm/npb/
+├── Chart.yaml              # Metadata (name, version, description)
+├── values.yaml             # Default values (dev/Minikube)
+├── values-prod.yaml        # Production overrides
+└── templates/
+    ├── _helpers.tpl        # Reusable label/naming helpers
+    ├── namespace.yml       # Namespace
+    ├── secret.yml          # Base64-encoded secrets
+    ├── configmap.yml       # Non-secret env vars (dynamic range loop)
+    ├── postgres.yml        # Conditional StatefulSet + PVC + Service
+    ├── app.yml             # Deployment + Service with health probes
+    ├── ingress.yml         # Conditional Ingress with TLS support
+    ├── hpa.yml             # Conditional HorizontalPodAutoscaler
+    └── cert-manager.yml    # TLS certificate provisioning
+```
+
+### Key Patterns
+
+**Conditional resources** — disable components via values:
+
+```yaml
+database:
+  enabled: true # Set false when using AWS RDS
+
+ingress:
+  enabled: true
+
+autoscaling:
+  enabled: true
+```
+
+**Template helpers** — consistent labels across all resources:
+
+```yaml
+{ { - include "npb.labels" . | nindent 4 } }
+```
+
+**Dynamic ConfigMap** — new env vars auto-appear without editing templates:
+
+```yaml
+data:
+  {{- range $key, $value := .Values.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+```
+
+### Commands
+
+```bash
+# Validate chart syntax
+helm lint ./helm/npb
+
+# Preview rendered YAML without deploying
+helm template npb-release ./helm/npb
+
+# Install to cluster
+helm install npb-release ./helm/npb --namespace npb --create-namespace
+
+# Upgrade with changed values (e.g. scale up)
+helm upgrade npb-release ./helm/npb --namespace npb --set app.replicaCount=3
+
+# Deploy to production with different values
+helm install npb-prod ./helm/npb -n npb-prod --create-namespace -f ./helm/npb/values-prod.yaml
+
+# Rollback to previous release
+helm rollback npb-release 1 --namespace npb
+
+# View release history
+helm history npb-release --namespace npb
+
+# Uninstall everything
+helm uninstall npb-release --namespace npb
+```
+
+---
+
+## 12. Phase 10 — SSL/TLS with cert-manager
+
+### Goal
+
+Serve HTTPS with automatically provisioned and renewed TLS certificates. Uses self-signed certificates for local development and Let's Encrypt for production.
+
+### How cert-manager Works
+
+```
+cert-manager watches Certificate resources
+         │
+         ▼
+Contacts the Issuer (self-signed or Let's Encrypt)
+         │
+         ▼
+Proves domain ownership (HTTP-01 challenge for Let's Encrypt)
+         │
+         ▼
+Stores signed certificate as a Kubernetes Secret
+         │
+         ▼
+Ingress reads the Secret and terminates TLS
+         │
+         ▼
+Auto-renews 30 days before expiry
+```
+
+### Installation
+
+```bash
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml
+
+# Wait for pods to be ready
+kubectl wait --for=condition=ready pod --all -n cert-manager --timeout=120s
+
+# Verify (should see 3 pods: controller, cainjector, webhook)
+kubectl get pods -n cert-manager
+```
+
+### Configuration in Helm Values
+
+**Local development (self-signed):**
+
+```yaml
+tls:
+  enabled: true
+  issuerType: self-signed
+  issuerName: selfsigned-issuer
+  domains:
+    - npb.local
+```
+
+**Production (Let's Encrypt):**
+
+```yaml
+tls:
+  enabled: true
+  issuerType: letsencrypt
+  issuerName: letsencrypt-prod
+  email: your-email@example.com
+  domains:
+    - npb.yourdomain.com
+```
+
+### Verifying Certificates
+
+```bash
+# Check certificate status
+kubectl get certificate -n npb
+# Should show READY=True
+
+# Check the TLS secret was created
+kubectl get secret -n npb | grep tls
+
+# Test HTTPS (self-signed needs -k to skip verification)
+curl -k --resolve npb.local:443:$(minikube ip) https://npb.local/
+```
+
+### Self-signed vs Let's Encrypt
+
+|                         | Self-signed (dev)     | Let's Encrypt (prod)      |
+| ----------------------- | --------------------- | ------------------------- |
+| Trusted by browsers?    | No (security warning) | Yes                       |
+| Requires public domain? | No                    | Yes                       |
+| Renewal                 | Automatic             | Automatic (every 60 days) |
+| Use case                | Local testing, CI     | Production                |
+
+### Troubleshooting: Ingress 404 with TLS
+
+**Error:** `curl -k https://<minikube-ip>/` returns `404 Not Found` from Nginx.
+
+**Cause:** The Ingress has a `host` field set (e.g. `npb.local`). Requests sent to an IP address don't match the host rule.
+
+**Fix:** Use the hostname with `--resolve` or add to `/etc/hosts`:
+
+```bash
+# Option 1: curl with resolve
+curl -k --resolve npb.local:443:$(minikube ip) https://npb.local/
+
+# Option 2: Add to hosts file
+echo "$(minikube ip) npb.local" | sudo tee -a /etc/hosts
+# Then open https://npb.local/ in browser
+```
 
 ### Request Flow (Production)
 
@@ -1451,3 +1772,87 @@ Three-stage multi-stage build:
 | `production`   | `node:16.13.1-alpine` | Copy only built artifacts and prod node_modules, minimal final image |
 
 The Alpine base image includes OpenSSL 1.1, which is required by Next.js 12's SWC compiler. This is why the Docker build works on Ubuntu 24.04 even though a bare-metal build on the same server fails.
+
+---
+
+## 13. Architecture Summary
+
+### Request Flow (Production — EC2 Docker)
+
+```
+Browser request
+    │
+    ▼
+Nginx (port 80)
+    │  proxy_pass http://localhost:3001
+    ▼
+Express server (port 3001)
+    │  next.js request handler
+    ▼
+Next.js page or API route
+    │  Prisma ORM
+    ▼
+PostgreSQL container (npb-db-prod)
+```
+
+### Request Flow (Kubernetes)
+
+```
+Browser request
+    │
+    ▼
+Ingress Controller (port 80/443, TLS termination)
+    │
+    ▼
+Service: npb-app (ClusterIP, load balances across pods)
+    │
+    ├──▶ Pod 1 (Next.js + Express, port 3001)
+    ├──▶ Pod 2
+    └──▶ Pod 3
+              │
+              ▼
+         Service: npb-db (ClusterIP)
+              │
+              ▼
+         StatefulSet Pod (PostgreSQL, PersistentVolume)
+```
+
+### Environment Variable Flow
+
+```
+envs/production-docker/.env.production.docker        (versioned, non-secret defaults)
+envs/production-docker/.env.production.docker.local  (not versioned, secrets + overrides)
+    │
+    ├── runtime vars → injected into running container via env_file
+    │
+    └── build vars (DATABASE_URL, NEXTAUTH_URL)
+            → must be exported to host shell before docker compose build
+            → passed as ARG into Dockerfile.prod at build time
+```
+
+### Docker Image Build (Dockerfile.prod)
+
+Three-stage multi-stage build:
+
+| Stage          | Base                  | Purpose                                                              |
+| -------------- | --------------------- | -------------------------------------------------------------------- |
+| `dependencies` | `node:16.13.1-alpine` | Install prod + dev deps, generate Prisma client                      |
+| `builder`      | `node:16.13.1-alpine` | Copy source, run `yarn build`, compile TypeScript server             |
+| `production`   | `node:16.13.1-alpine` | Copy only built artifacts and prod node_modules, minimal final image |
+
+The Alpine base image includes OpenSSL 1.1, which is required by Next.js 12's SWC compiler. This is why the Docker build works on Ubuntu 24.04 even though a bare-metal build on the same server fails.
+
+### Complete Skills Demonstrated
+
+| Phase | Technology              | What Was Built                                          |
+| ----- | ----------------------- | ------------------------------------------------------- |
+| 1     | Local Development       | App running natively, database setup, migrations        |
+| 2     | Docker + Docker Compose | Multi-service containerized stack                       |
+| 3     | AWS EC2 + Nginx         | Production server with reverse proxy                    |
+| 4     | GitHub Actions          | Automated CI/CD pipeline                                |
+| 5     | Terraform               | Infrastructure as code, reproducible provisioning       |
+| 6     | Prometheus + Grafana    | Metrics, dashboards, alert rules                        |
+| 7     | Kubernetes (Minikube)   | Pods, services, deployments, health probes, autoscaling |
+| 8     | ArgoCD                  | GitOps — declarative, self-healing deployment           |
+| 9     | Helm Charts             | Reusable, configurable K8s package management           |
+| 10    | cert-manager            | Automated TLS certificate provisioning and renewal      |
