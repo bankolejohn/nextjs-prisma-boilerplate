@@ -24,6 +24,9 @@
 11. [Phase 9 — Helm Charts](#11-phase-9--helm-charts-kubernetes-package-management)
 12. [Phase 10 — SSL/TLS with cert-manager](#12-phase-10--ssltls-with-cert-manager)
 13. [Architecture Summary](#13-architecture-summary)
+14. [Phase 11 — Centralized Logging (Loki + Promtail)](#14-phase-11--centralized-logging-loki--promtail)
+15. [Troubleshooting Reference (Additional)](#15-troubleshooting-reference-additional)
+16. [Architecture Summary (Final)](#16-architecture-summary)
 
 ---
 
@@ -1775,7 +1778,313 @@ The Alpine base image includes OpenSSL 1.1, which is required by Next.js 12's SW
 
 ---
 
-## 13. Architecture Summary
+## 14. Phase 11 — Centralized Logging (Loki + Promtail)
+
+### Goal
+
+Aggregate all pod logs into a single searchable system. No more running `kubectl logs` on each pod individually. Query logs alongside metrics in Grafana.
+
+### Architecture
+
+```
+Pod 1 → stdout/stderr ─┐
+Pod 2 → stdout/stderr ──┼──→ Promtail (DaemonSet) ──→ Loki ──→ Grafana
+Pod 3 → stdout/stderr ─┘
+```
+
+**Promtail** runs as a DaemonSet (one pod per node). It mounts `/var/log/pods` from the host, discovers pods via the Kubernetes API, attaches metadata labels, and ships log lines to Loki.
+
+**Loki** stores logs indexed by labels (namespace, pod, container) — not full-text indexed like Elasticsearch. This makes it lightweight and cost-effective.
+
+**Grafana** queries Loki via LogQL (similar to PromQL for logs).
+
+### Installation
+
+```bash
+# Add Grafana Helm repo
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Install Loki + Promtail (chart version 2.10.2 ships Loki v2.9.3)
+helm install loki grafana/loki-stack \
+  --namespace monitoring \
+  --create-namespace \
+  --version 2.10.2 \
+  --set grafana.enabled=false \
+  --set promtail.enabled=true \
+  --set loki.persistence.enabled=false
+
+# Wait for Loki to be ready
+kubectl wait --for=condition=ready pod loki-0 -n monitoring --timeout=180s
+
+# Install Grafana (MUST use v10.x — see troubleshooting below)
+helm install grafana grafana/grafana \
+  --namespace monitoring \
+  --set persistence.enabled=false \
+  --set adminPassword=admin \
+  --set image.tag=10.0.0
+```
+
+### Accessing Grafana
+
+```bash
+kubectl port-forward svc/grafana -n monitoring 3002:80
+# Open http://localhost:3002 — login: admin / admin
+```
+
+### Adding Loki Data Source
+
+In Grafana UI: **Connections → Data Sources → Add data source → Loki**
+
+URL: `http://loki:3100`
+
+Click **Save & Test** — should show "Data source successfully connected."
+
+### Querying Logs (LogQL)
+
+Go to **Explore** → select **Loki** data source:
+
+```logql
+# All logs from npb namespace
+{namespace="npb"}
+
+# Only app container logs
+{namespace="npb", container="app"}
+
+# Postgres logs
+{namespace="npb", container="postgres"}
+
+# Search for errors
+{namespace="npb"} |= "error"
+
+# Filter by HTTP 500
+{namespace="npb"} |= "500"
+
+# All log streams (broadest query — useful to verify data is flowing)
+{job=~".+"}
+
+# Rate of error logs per minute
+rate({namespace="npb"} |= "error" [1m])
+```
+
+### How Promtail Works
+
+Promtail runs as a DaemonSet — one pod per cluster node. It:
+
+1. Mounts `/var/log/pods` from the node filesystem
+2. Discovers running pods via the Kubernetes API
+3. Attaches labels from pod metadata (namespace, pod name, container name, job)
+4. Streams log lines to Loki in batches
+
+No application code changes needed. Any `console.log`, `console.error`, or stdout output is collected automatically.
+
+### Version Compatibility (Critical)
+
+| Grafana Version | Loki 2.9.x Compatibility     |
+| --------------- | ---------------------------- |
+| 10.x            | ✅ Works                     |
+| 11.x            | ⚠️ May work                  |
+| 12.x            | ❌ Incompatible health check |
+
+**Always pin Grafana to 10.x when using Loki from the loki-stack chart.**
+
+---
+
+## 15. Troubleshooting Reference (Additional)
+
+### Grafana 12.x cannot connect to Loki 2.9.x
+
+**Error (in Grafana logs):**
+
+```
+Loki health check failed" error="error from loki: parse error at line 1, col 1: syntax error: unexpected IDENTIFIER
+```
+
+**Cause:** Grafana 12+ sends a newer LogQL health check query syntax that Loki 2.9.x doesn't understand. The networking between Grafana and Loki works fine (verified with `wget http://loki:3100/ready` from inside the Grafana pod), but the data source test fails because of the incompatible query format.
+
+**How to confirm:** Run from inside the Grafana pod:
+
+```bash
+kubectl exec -it deploy/grafana -n monitoring -- wget -qO- http://loki:3100/ready
+# Returns "ready" — networking is fine, the issue is query compatibility
+```
+
+**Fix:** Pin Grafana to version 10.x:
+
+```bash
+helm uninstall grafana -n monitoring
+helm install grafana grafana/grafana \
+  --namespace monitoring \
+  --set persistence.enabled=false \
+  --set adminPassword=admin \
+  --set image.tag=10.0.0
+```
+
+---
+
+### Loki probe timeouts in Minikube
+
+**Error:**
+
+```
+Readiness probe failed: Get "http://10.244.0.51:3100/ready": context deadline exceeded
+Liveness probe failed: Get "http://10.244.0.51:3100/ready": context deadline exceeded
+```
+
+**Cause:** Same as the Postgres probe issue — Minikube's limited resources cause Loki to respond slower than the default 1-second probe timeout.
+
+**Fix:** Reinstall with lenient probe settings:
+
+```bash
+helm install loki grafana/loki-stack \
+  --namespace monitoring \
+  --version 2.10.2 \
+  --set loki.livenessProbe.initialDelaySeconds=60 \
+  --set loki.livenessProbe.timeoutSeconds=10 \
+  --set loki.readinessProbe.initialDelaySeconds=60 \
+  --set loki.readinessProbe.timeoutSeconds=10 \
+  --set loki.resources.requests.memory=256Mi \
+  --set loki.resources.limits.memory=512Mi
+```
+
+---
+
+### Loki newer chart requires S3 bucket configuration
+
+**Error:**
+
+```
+Please define loki.storage.bucketNames.chunks
+```
+
+**Cause:** The newer `grafana/loki` chart (not `loki-stack`) defaults to distributed mode with object storage (S3). For local development this is unnecessary.
+
+**Fix:** Use the `loki-stack` chart instead which supports filesystem storage:
+
+```bash
+helm install loki grafana/loki-stack --version 2.10.2 ...
+```
+
+---
+
+### No log data appearing in Grafana Explore
+
+**Possible causes:**
+
+1. Promtail hasn't shipped logs yet (ships in batches every few seconds)
+2. Label query doesn't match — try the broadest possible query: `{job=~".+"}`
+3. Time range in Grafana is too narrow — expand to "Last 1 hour"
+4. No traffic has hit the app since Promtail started — generate some requests first
+
+**Debug steps:**
+
+```bash
+# Verify Promtail is running
+kubectl get pods -n monitoring | grep promtail
+
+# Check Promtail logs for shipping errors
+kubectl logs -n monitoring -l app.kubernetes.io/name=promtail --tail 20
+
+# Generate traffic
+curl http://$(minikube ip)/
+
+# Try broadest query in Grafana Explore
+{job=~".+"}
+```
+
+---
+
+## 16. Architecture Summary
+
+### Request Flow (Production — EC2 Docker)
+
+```
+Browser request
+    │
+    ▼
+Nginx (port 80)
+    │  proxy_pass http://localhost:3001
+    ▼
+Express server (port 3001)
+    │  next.js request handler
+    ▼
+Next.js page or API route
+    │  Prisma ORM
+    ▼
+PostgreSQL container (npb-db-prod)
+```
+
+### Request Flow (Kubernetes)
+
+```
+Browser request
+    │
+    ▼
+Ingress Controller (port 80/443, TLS termination)
+    │
+    ▼
+Service: npb-app (ClusterIP, load balances across pods)
+    │
+    ├──▶ Pod 1 (Next.js + Express, port 3001)
+    ├──▶ Pod 2
+    └──▶ Pod 3
+              │
+              ▼
+         Service: npb-db (ClusterIP)
+              │
+              ▼
+         StatefulSet Pod (PostgreSQL, PersistentVolume)
+```
+
+### Observability Stack (Kubernetes)
+
+```
+App Pods ──→ Promtail ──→ Loki ──→ Grafana (Logs)
+App Pods ──→ /api/metrics ──→ Prometheus ──→ Grafana (Metrics)
+                                    │
+                                    └──→ Alert Rules ──→ Alertmanager (future)
+```
+
+### Environment Variable Flow
+
+```
+envs/production-docker/.env.production.docker        (versioned, non-secret defaults)
+envs/production-docker/.env.production.docker.local  (not versioned, secrets + overrides)
+    │
+    ├── runtime vars → injected into running container via env_file
+    │
+    └── build vars (DATABASE_URL, NEXTAUTH_URL)
+            → must be exported to host shell before docker compose build
+            → passed as ARG into Dockerfile.prod at build time
+```
+
+### Docker Image Build (Dockerfile.prod)
+
+Three-stage multi-stage build:
+
+| Stage          | Base                  | Purpose                                                              |
+| -------------- | --------------------- | -------------------------------------------------------------------- |
+| `dependencies` | `node:16.13.1-alpine` | Install prod + dev deps, generate Prisma client                      |
+| `builder`      | `node:16.13.1-alpine` | Copy source, run `yarn build`, compile TypeScript server             |
+| `production`   | `node:16.13.1-alpine` | Copy only built artifacts and prod node_modules, minimal final image |
+
+The Alpine base image includes OpenSSL 1.1, which is required by Next.js 12's SWC compiler. This is why the Docker build works on Ubuntu 24.04 even though a bare-metal build on the same server fails.
+
+### Complete Skills Demonstrated
+
+| Phase | Technology              | What Was Built                                          |
+| ----- | ----------------------- | ------------------------------------------------------- |
+| 1     | Local Development       | App running natively, database setup, migrations        |
+| 2     | Docker + Docker Compose | Multi-service containerized stack                       |
+| 3     | AWS EC2 + Nginx         | Production server with reverse proxy                    |
+| 4     | GitHub Actions          | Automated CI/CD pipeline                                |
+| 5     | Terraform               | Infrastructure as code, reproducible provisioning       |
+| 6     | Prometheus + Grafana    | Metrics, dashboards, alert rules                        |
+| 7     | Kubernetes (Minikube)   | Pods, services, deployments, health probes, autoscaling |
+| 8     | ArgoCD                  | GitOps — declarative, self-healing deployment           |
+| 9     | Helm Charts             | Reusable, configurable K8s package management           |
+| 10    | cert-manager            | Automated TLS certificate provisioning and renewal      |
+| 11    | Loki + Promtail         | Centralized log aggregation and querying                |
 
 ### Request Flow (Production — EC2 Docker)
 
@@ -1856,3 +2165,4 @@ The Alpine base image includes OpenSSL 1.1, which is required by Next.js 12's SW
 | 8     | ArgoCD                  | GitOps — declarative, self-healing deployment           |
 | 9     | Helm Charts             | Reusable, configurable K8s package management           |
 | 10    | cert-manager            | Automated TLS certificate provisioning and renewal      |
+| 11    | Loki + Promtail         | Centralized log aggregation and querying                |
